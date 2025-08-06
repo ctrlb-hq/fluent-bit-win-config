@@ -1,6 +1,5 @@
 ﻿# FluentBit Complete Deployment Script with Windows Service
 # Installs FluentBit, SQLite tools, copies config files, customizes configuration, and creates Windows Service
-# Version: 4.2 - Added simplified gzip processing with overlap detection
 
 param(
     [Parameter(Mandatory=$false)]
@@ -81,7 +80,16 @@ param(
     [switch]$TestOnly,
     
     [Parameter(Mandatory=$false)]
-    [switch]$Force
+    [switch]$Force,
+
+    [Parameter(Mandatory=$false)]
+    [int]$MaxGzipFilesPerRun = 5,          # Batch size for gzip processing
+
+    [Parameter(Mandatory=$false)]
+    [int]$MaxGzipBatchSizeMB = 200,        # Total size limit per batch
+
+    [Parameter(Mandatory=$false)]
+    [int]$GzipSleepBetweenFiles = 2        # Longer pause for safety
 )
 
 # Function to write colored output
@@ -466,7 +474,8 @@ function Invoke-DeepCleanup {
         $StoragePath,                                    # FluentBit storage/database files
         "C:\temp\sqlite-tools",                         # SQLite tools we installed
         "C:\temp\processed-gzip-files.txt",             # Our decompress script tracking file
-        "C:\temp\gzip-initial-processing-complete.txt", # NEW: Completion marker files
+        "C:\temp\gzip-initial-processing-complete.txt", # Completion marker files
+        "C:\temp\gzip-processing-progress.txt",         # NEW: Progress tracking file
         "C:\temp\decompressed-logs",                    # Only decompressed logs that our script creates
         (Split-Path $FluentBitLogPath -Parent)         # FluentBit log directory
     )
@@ -809,6 +818,7 @@ function Generate-LogInputSections {
 }
 
 # Function to generate INPUT sections for gzip decompression with simplified logic
+# Function to generate INPUT sections for gzip decompression with safe batch processing
 function Generate-GzipInputSections {
     param(
         [string[]]$GzipPaths,
@@ -821,15 +831,15 @@ function Generate-GzipInputSections {
         # Sanitize path for tag name
         $pathSanitized = ($path -replace '[\\/:*?"<>|]', '_').Trim('_')
         
-        # NEW: Build the command with LogPaths parameter for overlap detection
+        # Build the command with all safety parameters
         $logPathsParam = ""
         if ($LogPaths.Count -gt 0) {
             $logPathsArray = ($LogPaths | ForEach-Object { "`"$_`"" }) -join ","
             $logPathsParam = " -LogPaths @($logPathsArray)"
         }
         
-        # NEW: Modified command to include LogPaths and remove MaxFilesPerRun (simplified processing)
-        $command = "powershell.exe -ExecutionPolicy Bypass -File `"$ConfigPath\auto-decompress.ps1`" -SourcePattern `"$path\*.gz`" -TargetDir `"C:\temp\decompressed-logs\$pathSanitized`" -Sqlite3Path `"$SqliteToolsPath\sqlite3.exe`" -FluentBitDBPath `"$StoragePath\tail-gzip-$pathSanitized.db`" -FileSizeLimitMB 50$logPathsParam"
+        # Updated command with safe batch processing parameters
+        $command = "powershell.exe -ExecutionPolicy Bypass -File `"$ConfigPath\auto-decompress.ps1`" -SourcePattern `"$path\*.gz`" -TargetDir `"C:\temp\decompressed-logs\$pathSanitized`" -Sqlite3Path `"$SqliteToolsPath\sqlite3.exe`" -FluentBitDBPath `"$StoragePath\tail-gzip-$pathSanitized.db`" -MaxFilesPerRun $MaxGzipFilesPerRun -MaxTotalSizeMB $MaxGzipBatchSizeMB -FileSizeLimitMB 50 -SleepBetweenFiles $GzipSleepBetweenFiles$logPathsParam"
         
         $inputSection = @"
 
@@ -1337,7 +1347,12 @@ function Show-DeploymentSummary {
     }
     
     # NEW: Enhanced gzip path summary with overlap detection
+# Enhanced gzip path summary with safe batch processing
     Write-Host "`nGzip Processing Configuration ($($GzipPaths.Count) paths):" -ForegroundColor Yellow
+    Write-Host "  • Max files per batch: $MaxGzipFilesPerRun" -ForegroundColor Gray
+    Write-Host "  • Max size per batch: $MaxGzipBatchSizeMB MB" -ForegroundColor Gray
+    Write-Host "  • Sleep between files: $GzipSleepBetweenFiles seconds" -ForegroundColor Gray
+
     foreach ($gzipPath in $GzipPaths) {
         Write-Host "  • $gzipPath\*.gz" -ForegroundColor Gray
         
@@ -1354,7 +1369,7 @@ function Show-DeploymentSummary {
                         $normalizedLogPath.StartsWith($normalizedGzipPath, [StringComparison]::OrdinalIgnoreCase)) {
                         $hasOverlap = $true
                         Write-Host "    → RESTRICTED: Overlaps with log path '$normalizedLogPath'" -ForegroundColor Yellow
-                        Write-Host "    → Processing: Initial one-time processing only" -ForegroundColor Yellow
+                        Write-Host "    → Processing: Safe batch processing until completion" -ForegroundColor Yellow
                         break
                     }
                 }
@@ -1368,18 +1383,21 @@ function Show-DeploymentSummary {
         }
         
         if (-not $hasOverlap) {
-            Write-Host "    → Processing: Continuous monitoring (no overlap detected)" -ForegroundColor Green
+            Write-Host "    → Processing: Safe batch processing (ongoing monitoring)" -ForegroundColor Green
         }
     }
-    
-    Write-Host "`nGzip Processing Logic:" -ForegroundColor Yellow
+
+    Write-Host "`nSafe Batch Processing Logic:" -ForegroundColor Yellow
+    Write-Host "  • ALL gzip paths now use safe batch processing" -ForegroundColor Gray
+    Write-Host "  • Memory protection: Max $MaxGzipFilesPerRun files or $MaxGzipBatchSizeMB MB per batch" -ForegroundColor Gray
     Write-Host "  • If gzip path overlaps with log paths:" -ForegroundColor Gray
-    Write-Host "    - First run: Process ALL existing gzip files" -ForegroundColor Gray
-    Write-Host "    - Subsequent runs: Skip gzip processing completely" -ForegroundColor Gray
-    Write-Host "    - Rationale: Avoid duplicate processing of logs" -ForegroundColor Gray
+    Write-Host "    - Process ALL existing files in safe batches" -ForegroundColor Gray
+    Write-Host "    - Mark completion when finished" -ForegroundColor Gray
+    Write-Host "    - Skip gzip processing in subsequent runs" -ForegroundColor Gray
     Write-Host "  • If no overlap:" -ForegroundColor Gray
-    Write-Host "    - Normal continuous monitoring of new gzip files" -ForegroundColor Gray
-    
+    Write-Host "    - Process one batch per run (ongoing monitoring)" -ForegroundColor Gray
+    Write-Host "  • Benefits: Prevents OOM kills, stable memory usage" -ForegroundColor Gray
+
     # Show cleanup actions if performed
     if ($CleanInstall -or $DeepClean) {
         Write-Host "`nCleanup Actions Performed:" -ForegroundColor Yellow

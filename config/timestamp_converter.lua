@@ -131,10 +131,6 @@ function convert_timestamp(tag, timestamp, record)
         record["host_ip_class"] = "unknown"
     end
     
-    -- Add source metadata
-    record["log_source_agent"] = "fluent-bit"
-    record["log_processor"] = "fluent-bit-windows-service"
-    
     -- Check if we have a parsed timestamp from the regex parser
     if record["log_timestamp"] then
         local year, month, day, hour, min, sec, msec

@@ -12,6 +12,9 @@ To use the script, just run:
      -LogPaths @("C:\ProgramData\GuestConfig", "D:\c-base\logs") `
      -GzipPaths @("C:\ProgramData\GuestConfig", "D:\c-base\logs") `
      -MaxDirectoryDepth 4 `
+     -MaxGzipFilesPerRun 3 `
+     -MaxGzipBatchSizeMB 150 `
+     -GzipSleepBetweenFiles 3 `
      -DeepClean `
      -CleanInstall `
      -FluentBitLogLevel "info"
