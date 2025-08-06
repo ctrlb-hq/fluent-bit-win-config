@@ -12,8 +12,8 @@ To use the script, just run:
      -LogPaths @("C:\ProgramData\GuestConfig", "D:\c-base\logs") `
      -GzipPaths @("C:\ProgramData\GuestConfig", "D:\c-base\logs") `
      -MaxDirectoryDepth 4 `
-     -MaxGzipFilesPerRun 3 `
-     -MaxGzipBatchSizeMB 150 `
+     -MaxGzipFilesPerRun 4 `
+     -MaxGzipBatchSizeMB 300 `
      -GzipSleepBetweenFiles 3 `
      -DeepClean `
      -CleanInstall `
@@ -42,3 +42,9 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
 ```
 
 and then Yes to All [A] to be able to run scripts.
+
+To track the logs of FluentBit:
+
+```ps
+& 'C:\temp\logs\monitor-fluent-bit.ps1'
+```
