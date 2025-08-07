@@ -1152,6 +1152,28 @@ function Write-GzipLog {
     Write-Output $entry
 }
 
+function Update-GzipMappingFile {
+    param([object]$StateData, [string]$StoragePath)
+    
+    $mappingFile = "$StoragePath\gzip-mappings.txt"
+    $mappingContent = @()
+    
+    # Create simple key=value mappings for completed files
+    $completedFiles = $StateData.discovered_files | Where-Object { $_.status -eq "completed" -and $_.temp_file_path }
+    
+    foreach ($fileInfo in $completedFiles) {
+        $tempFileName = Split-Path $fileInfo.temp_file_path -Leaf
+        # $originalPath = $fileInfo.original_path -replace '\\', '\\'  # Escape backslashes for file format
+        $originalPath = $fileInfo.original_path
+        $mappingContent += "$tempFileName=$originalPath"
+    }
+    
+    # Write the mapping file
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllLines($mappingFile, $mappingContent, $utf8NoBom)
+    Write-GzipLog "Updated mapping file with $($mappingContent.Count) entries" "INFO"
+}
+
 function Get-FileProcessingStatus {
     param([string]$FilePath, [string]$DbPath)
     
@@ -1298,6 +1320,8 @@ try {
     $stateData.processing_stats.completed += $processedCount
     $stateData.processing_stats.failed += $failedCount
     $stateData.processing_stats.pending -= ($processedCount + $failedCount)
+
+    Update-GzipMappingFile -StateData $stateData -StoragePath $StoragePath
     
     # Save updated state
     $updatedJson = $stateData | ConvertTo-Json -Depth 10

@@ -9,7 +9,6 @@ local gzip_mapping_cache = nil
 local gzip_cache_loaded = false
 local gzip_cache_load_time = 0
 
-
 function add_host_info(tag, timestamp, record)
     if host_info_cache then
         for key, value in pairs(host_info_cache) do
@@ -114,54 +113,42 @@ function convert_timestamp(tag, timestamp, record)
     return 1, timestamp, record
 end
 
--- Function to load gzip mappings into cache (called once)
+
+-- Simple function to load mappings from dedicated mapping file
 function load_gzip_mappings()
-    if gzip_cache_loaded then
+    if gzip_cache_loaded and gzip_mapping_cache then
         return gzip_mapping_cache
     end
     
-    local state_file = "C:/temp/flb-storage/gzip-processing-state.json"
-    local file = io.open(state_file, "r")
+    local mapping_file = "C:/temp/flb-storage/gzip-mappings.txt"
+    local file = io.open(mapping_file, "r")
     if not file then
         gzip_cache_loaded = true
         gzip_mapping_cache = {}
         return gzip_mapping_cache
     end
     
-    local content = file:read("*all")
-    file:close()
-    
-    if not content or content == "" then
-        gzip_cache_loaded = true
-        gzip_mapping_cache = {}
-        return gzip_mapping_cache
-    end
-    
-    -- Build a mapping table: temp_filename -> original_path
     gzip_mapping_cache = {}
     
-    -- Extract all file mappings and build lookup table
-    for original_path in string.gmatch(content, '"original_path"%s*:%s*"([^"]+)"') do
-        -- Find corresponding temp file pattern
-        local pattern = '"original_path"%s*:%s*"' .. string.gsub(original_path, "([%(%)%.%+%-%*%?%[%]%^%$%%\\])", "%%%1") .. '".-"temp_file_path"%s*:%s*"([^"]*)"'
-        local temp_path = string.match(content, pattern)
-        if temp_path and temp_path ~= "" then
-            -- Extract just the filename for lookup
-            local temp_filename = string.match(temp_path, "([^/\\]+)$")
-            if temp_filename then
-                -- Unescape JSON backslashes
+    -- Read simple key=value pairs
+    for line in file:lines() do
+        line = line:match("^%s*(.-)%s*$")  -- trim whitespace
+        if line and line ~= "" then
+            local temp_filename, original_path = line:match("^([^=]+)=(.+)$")
+            if temp_filename and original_path then
+                -- Unescape backslashes
                 original_path = string.gsub(original_path, "\\\\", "\\")
                 gzip_mapping_cache[temp_filename] = original_path
             end
         end
     end
     
+    file:close()
     gzip_cache_loaded = true
-    gzip_cache_load_time = os.time()
     return gzip_mapping_cache
 end
 
--- Improved function that uses cached mappings
+-- Simplified and reliable mapping function
 function map_gzip_source_path(tag, timestamp, record)
     -- Only process records from gzip inputs
     if not (tag and string.match(tag, "app%.java%.gzip%..*%.archived")) then
@@ -183,20 +170,35 @@ function map_gzip_source_path(tag, timestamp, record)
         return 1, timestamp, record
     end
     
-    -- Load mappings into cache (only happens once per FluentBit process)
+    -- Load mappings from simple mapping file
     local mappings = load_gzip_mappings()
-    
-    -- Fast lookup in cached mapping table
     local original_path = mappings[temp_filename]
-    
+
     if original_path then
-        -- Successfully mapped using cache
+        -- Successfully mapped - now handle backslashes properly
+        -- The original path in the file has escaped backslashes, so unescape them
+        if string.find(original_path, "\\\\") then
+            original_path = string.gsub(original_path, "\\\\", "\\")
+        end
+        
         record["source_file_path"] = original_path
         record["extraction_timestamp"] = os.date("!%Y-%m-%dT%H:%M:%SZ")
     else
-        -- Not found in cache
-        record["source_file_path"] = temp_path
-        record["extraction_timestamp"] = os.date("!%Y-%m-%dT%H:%M:%SZ")
+        -- Force reload cache and try once more
+        gzip_cache_loaded = false
+        mappings = load_gzip_mappings()
+        original_path = mappings[temp_filename]
+        
+        if original_path then
+            if string.find(original_path, "\\\\") then
+                original_path = string.gsub(original_path, "\\\\", "\\")
+            end
+            record["source_file_path"] = original_path
+            record["extraction_timestamp"] = os.date("!%Y-%m-%dT%H:%M:%SZ")
+        else
+            record["source_file_path"] = temp_path
+            record["extraction_timestamp"] = os.date("!%Y-%m-%dT%H:%M:%SZ")
+        end
     end
     
     -- Remove the temp_file_path key
