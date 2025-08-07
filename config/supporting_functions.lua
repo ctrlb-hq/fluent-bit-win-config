@@ -4,6 +4,11 @@ local last_valid_timestamp = nil
 -- Cache for host information (computed once per process)
 local host_info_cache = nil
 
+-- Global cache for gzip file mappings (loaded once per FluentBit process)
+local gzip_mapping_cache = nil
+local gzip_cache_loaded = false
+local gzip_cache_load_time = 0
+
 
 function add_host_info(tag, timestamp, record)
     if host_info_cache then
@@ -105,6 +110,97 @@ function convert_timestamp(tag, timestamp, record)
 
     -- Add ingested time in ISO format
     record["ingestion_timestamp"] = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    
+    return 1, timestamp, record
+end
+
+-- Function to load gzip mappings into cache (called once)
+function load_gzip_mappings()
+    if gzip_cache_loaded then
+        return gzip_mapping_cache
+    end
+    
+    local state_file = "C:/temp/flb-storage/gzip-processing-state.json"
+    local file = io.open(state_file, "r")
+    if not file then
+        gzip_cache_loaded = true
+        gzip_mapping_cache = {}
+        return gzip_mapping_cache
+    end
+    
+    local content = file:read("*all")
+    file:close()
+    
+    if not content or content == "" then
+        gzip_cache_loaded = true
+        gzip_mapping_cache = {}
+        return gzip_mapping_cache
+    end
+    
+    -- Build a mapping table: temp_filename -> original_path
+    gzip_mapping_cache = {}
+    
+    -- Extract all file mappings and build lookup table
+    for original_path in string.gmatch(content, '"original_path"%s*:%s*"([^"]+)"') do
+        -- Find corresponding temp file pattern
+        local pattern = '"original_path"%s*:%s*"' .. string.gsub(original_path, "([%(%)%.%+%-%*%?%[%]%^%$%%\\])", "%%%1") .. '".-"temp_file_path"%s*:%s*"([^"]*)"'
+        local temp_path = string.match(content, pattern)
+        if temp_path and temp_path ~= "" then
+            -- Extract just the filename for lookup
+            local temp_filename = string.match(temp_path, "([^/\\]+)$")
+            if temp_filename then
+                -- Unescape JSON backslashes
+                original_path = string.gsub(original_path, "\\\\", "\\")
+                gzip_mapping_cache[temp_filename] = original_path
+            end
+        end
+    end
+    
+    gzip_cache_loaded = true
+    gzip_cache_load_time = os.time()
+    return gzip_mapping_cache
+end
+
+-- Improved function that uses cached mappings
+function map_gzip_source_path(tag, timestamp, record)
+    -- Only process records from gzip inputs
+    if not (tag and string.match(tag, "app%.java%.gzip%..*%.archived")) then
+        return 1, timestamp, record
+    end
+    
+    -- Check if we have a temp_file_path to map
+    if not record["temp_file_path"] then
+        return 1, timestamp, record
+    end
+    
+    local temp_path = record["temp_file_path"]
+    
+    -- Extract the temp filename for lookup
+    local temp_filename = string.match(temp_path, "([^/\\]+)$")
+    if not temp_filename then
+        record["source_file_path"] = temp_path
+        record["temp_file_path"] = nil
+        return 1, timestamp, record
+    end
+    
+    -- Load mappings into cache (only happens once per FluentBit process)
+    local mappings = load_gzip_mappings()
+    
+    -- Fast lookup in cached mapping table
+    local original_path = mappings[temp_filename]
+    
+    if original_path then
+        -- Successfully mapped using cache
+        record["source_file_path"] = original_path
+        record["extraction_timestamp"] = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    else
+        -- Not found in cache
+        record["source_file_path"] = temp_path
+        record["extraction_timestamp"] = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    end
+    
+    -- Remove the temp_file_path key
+    record["temp_file_path"] = nil
     
     return 1, timestamp, record
 end

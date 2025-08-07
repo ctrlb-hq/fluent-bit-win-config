@@ -602,17 +602,29 @@ function Deploy-ConfigurationFiles {
             Write-Status "Generating INPUT sections for $($LogPaths.Count) log paths..." "Info"
             $logInputSections = Generate-LogInputSections -Paths $LogPaths -MaxDepth $MaxDirectoryDepth
             
-            # Find and replace the INPUT placeholder comment
-            $inputPlaceholder = "# Input sections would be generated programatically using the deployment script"
-            if ($configContent -like "*$inputPlaceholder*") {
-                $configContent = $configContent -replace [regex]::Escape($inputPlaceholder), $logInputSections
-                Write-Status "Inserted generated INPUT sections" "Success"
+            # Generate gzip INPUT sections if enabled
+            $gzipInputSections = ""
+            if ($ProcessGzipFiles) {
+                Write-Status "Gzip processing enabled - initializing gzip file discovery..." "Info"
+                
+                # Initialize gzip processing and discover files
+                if (Initialize-GzipProcessing -LogPaths $LogPaths -MaxDepth $MaxDirectoryDepth -StoragePath $StoragePath) {
+                    Write-Status "Generating gzip INPUT sections..." "Info"
+                    $gzipInputSections = Generate-GzipInputSections -StoragePath $StoragePath
+                    
+                    # Deploy gzip processing script
+                    if (-not (Deploy-GzipProcessingScript)) {
+                        Write-Status "Failed to deploy gzip processing script, but continuing..." "Warning"
+                    }
+                } else {
+                    Write-Status "Gzip initialization failed, skipping gzip processing" "Warning"
+                }
             } else {
-                Write-Status "INPUT placeholder comment not found, appending sections" "Warning"
-                # Find [FILTER] section and insert before it
-                $filterPattern = '(\[FILTER\])'
-                $configContent = $configContent -replace $filterPattern, "$logInputSections`n`n`$1"
+                Write-Status "Gzip processing disabled" "Info"
             }
+
+            $configContent = $configContent -replace "<REGULAR_LOG_INPUTS>", $logInputSections
+            $configContent = $configContent -replace "<GZIP_INPUTS>", $gzipInputSections
             
             # Write the customized configuration using .NET method for true ASCII
             [System.IO.File]::WriteAllText($mainConfigTarget, $configContent, [System.Text.Encoding]::ASCII)
@@ -715,6 +727,35 @@ function Test-FluentBitConfiguration {
         
         if ($LASTEXITCODE -eq 0) {
             Write-Status "FluentBit configuration is valid" "Success"
+
+            # Additional gzip configuration validation
+            if ($ProcessGzipFiles) {
+                Write-Status "Validating gzip processing configuration..." "Info"
+                
+                # Check if gzip state file exists
+                $gzipStateFile = "$StoragePath\gzip-processing-state.json"
+                if (Test-Path $gzipStateFile) {
+                    try {
+                        $gzipState = Get-Content $gzipStateFile -Raw | ConvertFrom-Json
+                        $totalFiles = $gzipState.processing_stats.total_files
+                        Write-Status "Gzip configuration valid: $totalFiles archive files ready for processing" "Success"
+                    }
+                    catch {
+                        Write-Status "Warning: Gzip state file exists but is malformed" "Warning"
+                    }
+                } else {
+                    Write-Status "Warning: Gzip processing enabled but no state file found" "Warning"
+                }
+                
+                # Check if gzip processing script exists
+                $gzipScript = "$InstallPath\scripts\Process-GzipFiles.ps1"
+                if (Test-Path $gzipScript) {
+                    Write-Status "Gzip processing script deployed successfully" "Success"
+                } else {
+                    Write-Status "Warning: Gzip processing script not found" "Warning"
+                }
+            }
+
             return $true
         } else {
             Write-Status "FluentBit configuration test failed" "Error"
@@ -830,6 +871,16 @@ function Invoke-DeepCleanup {
         "C:\temp\sqlite-tools",                         # SQLite tools we installed
         (Split-Path $FluentBitLogPath -Parent)         # FluentBit log directory
     )
+
+    # NEW: Add gzip-specific cleanup paths
+    $gzipCleanupPaths = @(
+        "$StoragePath\gzip-temp",                       # Gzip temporary extraction directory
+        "$StoragePath\gzip-processing-state.json",     # Gzip state tracking file
+        "$StoragePath\gzip-processor.log",             # Gzip processor log file
+        "$InstallPath\scripts\Process-GzipFiles.ps1"   # Gzip processing script
+    )
+
+    $cleanupPaths += $gzipCleanupPaths
     
     foreach ($path in $cleanupPaths) {
         if (Test-Path $path) {
@@ -884,4 +935,325 @@ function Invoke-CleanupOperations {
     Start-Sleep -Seconds 5
     
     Write-Status "=== Cleanup Operations Completed ===" "Success"
+}
+
+# ============================================================================
+# GZIP PROCESSING FUNCTIONS
+# ============================================================================
+
+# Function to initialize gzip processing state
+function Initialize-GzipProcessing {
+    param(
+        [string[]]$LogPaths,
+        [int]$MaxDepth,
+        [string]$StoragePath
+    )
+    
+    Write-Status "Initializing gzip processing for archived log files..." "Step"
+    
+    # Create gzip temp directory structure
+    $gzipTempDir = "$StoragePath\gzip-temp"
+    if (-not (Ensure-Directory -Path $gzipTempDir)) {
+        Write-Status "Failed to create gzip temp directory: $gzipTempDir" "Error"
+        return $false
+    }
+    
+    # Scan for existing gzip files
+    $discoveredFiles = @()
+    $totalFiles = 0
+    
+    foreach ($logPath in $LogPaths) {
+        if (-not (Test-Path $logPath)) {
+            Write-Status "Warning: LogPath does not exist: $logPath" "Warning"
+            continue
+        }
+        
+        # Create sanitized folder name for this LogPath
+        $folderName = Split-Path $logPath -Leaf
+        $folderName = ($folderName -replace '[\\/:*?"<>|]', '_').Trim('_')
+        if ([string]::IsNullOrEmpty($folderName)) {
+            $folderName = "logs_$(Get-Random -Maximum 9999)"
+        }
+        
+        # Create corresponding temp subdirectory
+        $tempSubDir = "$gzipTempDir\$folderName"
+        if (-not (Ensure-Directory -Path $tempSubDir)) {
+            Write-Status "Failed to create gzip temp subdirectory: $tempSubDir" "Warning"
+            continue
+        }
+        
+        Write-Status "Scanning for gzip files in: $logPath (depth 0-$MaxDepth)" "Info"
+        
+        # Scan for .gz files at each depth level
+        for ($depth = 0; $depth -le $MaxDepth; $depth++) {
+            $searchPath = $logPath
+            if ($depth -gt 0) {
+                $searchPath = $logPath + ("\*" * $depth)
+            }
+            $gzipPattern = "$searchPath\*.gz"
+            
+            try {
+                $gzipFiles = Get-ChildItem -Path $gzipPattern -File -ErrorAction SilentlyContinue
+                
+                foreach ($gzipFile in $gzipFiles) {
+                    $fileInfo = @{
+                        original_path = $gzipFile.FullName
+                        logpath_parent = $logPath
+                        folder_name = $folderName
+                        relative_path = $gzipFile.FullName.Replace($logPath, '').TrimStart('\')
+                        size_bytes = $gzipFile.Length
+                        modified_date = $gzipFile.LastWriteTime.ToString('yyyy-MM-ddTHH:mm:ssZ')
+                        status = "pending"
+                        processed_timestamp = $null
+                        temp_file_path = $null
+                        extraction_attempts = 0
+                    }
+                    
+                    $discoveredFiles += $fileInfo
+                    $totalFiles++
+                }
+            }
+            catch {
+                Write-Status "Warning: Error scanning depth $depth in $logPath - $($_.Exception.Message)" "Warning"
+            }
+        }
+        
+        Write-Status "Found $($discoveredFiles.Count) gzip files for folder: $folderName" "Info"
+    }
+    
+    # Create state file
+    $stateFile = "$StoragePath\gzip-processing-state.json"
+    $stateData = @{
+        initialization_timestamp = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssZ')
+        gzip_temp_dir = $gzipTempDir
+        batch_size = $GzipBatchSize
+        processing_interval = $GzipProcessingInterval
+        discovered_files = $discoveredFiles
+        processing_stats = @{
+            total_files = $totalFiles
+            completed = 0
+            failed = 0
+            pending = $totalFiles
+            current_batch = @()
+        }
+    }
+    
+    try {
+        $stateJson = $stateData | ConvertTo-Json -Depth 10
+        [System.IO.File]::WriteAllText($stateFile, $stateJson, [System.Text.Encoding]::UTF8)
+        Write-Status "Created gzip processing state file: $stateFile" "Success"
+        Write-Status "Total gzip files discovered: $totalFiles" "Success"
+        return $true
+    }
+    catch {
+        Write-Status "Failed to create gzip state file: $($_.Exception.Message)" "Error"
+        return $false
+    }
+}
+
+# Function to generate gzip INPUT sections for FluentBit configuration
+function Generate-GzipInputSections {
+    param(
+        [string]$StoragePath
+    )
+    
+    $gzipTempDir = "$StoragePath\gzip-temp"
+    $stateFile = "$StoragePath\gzip-processing-state.json"
+    
+    # Check if state file exists
+    if (-not (Test-Path $stateFile)) {
+        Write-Status "No gzip state file found, skipping gzip INPUT generation" "Info"
+        return ""
+    }
+    
+    try {
+        $stateData = Get-Content $stateFile -Raw | ConvertFrom-Json
+        $inputSections = @()
+        
+        # Get unique folder names from discovered files
+        $folderNames = $stateData.discovered_files | 
+                      Select-Object -ExpandProperty folder_name | 
+                      Sort-Object -Unique
+        
+        foreach ($folderName in $folderNames) {
+            $tempPath = "$gzipTempDir\$folderName\*.log"
+            $tag = "app.java.gzip.$folderName.archived"
+            $dbFile = "$StoragePath\tail-gzip-$folderName.db"
+            
+            $inputSection = @"
+
+[INPUT]
+    Name                        tail
+    Path                        $tempPath
+    Tag                         $tag
+    DB                          $dbFile
+    DB.Sync                     Normal
+    Path_Key                    temp_file_path
+    Read_from_Head              true
+    Skip_Empty_Lines            On
+    Refresh_Interval            1
+    multiline.parser            java
+    Buffer_Chunk_Size           256K
+    Buffer_Max_Size             4M
+    Mem_Buf_Limit               50M
+    storage.type                filesystem
+    exit_on_eof                 true
+"@
+            $inputSections += $inputSection
+        }
+        
+        # Add exec input for gzip processor
+        $execInput = @"
+
+[INPUT]
+    Name                        exec
+    Command                     powershell.exe -ExecutionPolicy Bypass -File "$InstallPath\scripts\Process-GzipFiles.ps1" -StoragePath "$StoragePath"
+    Interval_Sec                $($stateData.processing_interval)
+    Tag                         gzip.processor.status
+"@
+        $inputSections += $execInput
+        
+        Write-Status "Generated $($folderNames.Count) gzip INPUT sections and exec processor" "Success"
+        return $inputSections -join ""
+    }
+    catch {
+        Write-Status "Failed to generate gzip INPUT sections: $($_.Exception.Message)" "Error"
+        return ""
+    }
+}
+
+# Function to deploy the gzip processing script
+function Deploy-GzipProcessingScript {
+    Write-Status "Deploying gzip processing script..." "Step"
+    
+    # Create scripts directory
+    $scriptsDir = "$InstallPath\scripts"
+    if (-not (Ensure-Directory -Path $scriptsDir)) {
+        Write-Status "Failed to create scripts directory: $scriptsDir" "Error"
+        return $false
+    }
+    
+    # Create the Process-GzipFiles.ps1 script content
+    $gzipScriptContent = @"
+# FluentBit Gzip Processing Script
+# Auto-generated by Deploy-FluentBit.ps1
+
+param(
+    [Parameter(Mandatory=`$true)]
+    [string]`$StoragePath
+)
+
+# Set up logging
+`$logFile = "`$StoragePath\gzip-processor.log"
+`$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+function Write-GzipLog {
+    param([string]`$Message, [string]`$Level = "INFO")
+    `$entry = "[`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [`$Level] `$Message"
+    Add-Content -Path `$logFile -Value `$entry -Encoding UTF8
+    Write-Output `$entry
+}
+
+try {
+    `$stateFile = "`$StoragePath\gzip-processing-state.json"
+    
+    if (-not (Test-Path `$stateFile)) {
+        Write-GzipLog "No gzip state file found: `$stateFile" "WARN"
+        exit 0
+    }
+    
+    # Read current state
+    `$stateData = Get-Content `$stateFile -Raw | ConvertFrom-Json
+    `$pendingFiles = `$stateData.discovered_files | Where-Object { `$_.status -eq "pending" }
+    
+    if (`$pendingFiles.Count -eq 0) {
+        Write-GzipLog "No pending gzip files to process" "INFO"
+        exit 0
+    }
+    
+    # Get next batch
+    `$batchSize = `$stateData.batch_size
+    `$currentBatch = `$pendingFiles | Select-Object -First `$batchSize
+    
+    Write-GzipLog "Processing batch of `$(`$currentBatch.Count) gzip files (batch size: `$batchSize)" "INFO"
+    
+    `$processedCount = 0
+    `$failedCount = 0
+    
+    foreach (`$fileInfo in `$currentBatch) {
+        try {
+            `$originalPath = `$fileInfo.original_path
+            `$folderName = `$fileInfo.folder_name
+            `$relativePath = `$fileInfo.relative_path
+            
+            # Create temp file path
+            `$fileName = [System.IO.Path]::GetFileNameWithoutExtension(`$originalPath)
+            `$tempFileName = "`$fileName-`$(Get-Date -Format 'yyyyMMdd-HHmmss')-`$(Get-Random -Maximum 9999).log"
+            `$tempFilePath = "`$(`$stateData.gzip_temp_dir)\`$folderName\`$tempFileName"
+            
+            Write-GzipLog "Extracting: `$originalPath -> `$tempFilePath" "INFO"
+            
+            # Extract gzip file
+            if (Test-Path `$originalPath) {
+                # Use .NET GZipStream for extraction
+                `$inputStream = [System.IO.File]::OpenRead(`$originalPath)
+                `$gzipStream = New-Object System.IO.Compression.GZipStream(`$inputStream, [System.IO.Compression.CompressionMode]::Decompress)
+                `$outputStream = [System.IO.File]::Create(`$tempFilePath)
+                
+                `$gzipStream.CopyTo(`$outputStream)
+                
+                `$outputStream.Close()
+                `$gzipStream.Close()
+                `$inputStream.Close()
+                
+                # Update file info in state
+                `$fileInfo.status = "completed"
+                `$fileInfo.processed_timestamp = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssZ')
+                `$fileInfo.temp_file_path = `$tempFilePath
+                
+                `$processedCount++
+                Write-GzipLog "Successfully extracted: `$originalPath" "SUCCESS"
+            } else {
+                Write-GzipLog "Source file not found: `$originalPath" "ERROR"
+                `$fileInfo.status = "failed"
+                `$fileInfo.extraction_attempts = (`$fileInfo.extraction_attempts + 1)
+                `$failedCount++
+            }
+        }
+        catch {
+            Write-GzipLog "Failed to extract `$(`$fileInfo.original_path): `$(`$_.Exception.Message)" "ERROR"
+            `$fileInfo.status = "failed"
+            `$fileInfo.extraction_attempts = (`$fileInfo.extraction_attempts + 1)
+            `$failedCount++
+        }
+    }
+    
+    # Update state statistics
+    `$stateData.processing_stats.completed += `$processedCount
+    `$stateData.processing_stats.failed += `$failedCount
+    `$stateData.processing_stats.pending -= (`$processedCount + `$failedCount)
+    
+    # Save updated state
+    `$updatedJson = `$stateData | ConvertTo-Json -Depth 10
+    [System.IO.File]::WriteAllText(`$stateFile, `$updatedJson, [System.Text.Encoding]::UTF8)
+    
+    Write-GzipLog "Batch completed: `$processedCount processed, `$failedCount failed. Remaining: `$(`$stateData.processing_stats.pending)" "INFO"
+}
+catch {
+    Write-GzipLog "Gzip processing script error: `$(`$_.Exception.Message)" "ERROR"
+    exit 1
+}
+"@
+    
+    # Write the script file
+    $gzipScriptPath = "$scriptsDir\Process-GzipFiles.ps1"
+    try {
+        [System.IO.File]::WriteAllText($gzipScriptPath, $gzipScriptContent, [System.Text.Encoding]::UTF8)
+        Write-Status "Created gzip processing script: $gzipScriptPath" "Success"
+        return $true
+    }
+    catch {
+        Write-Status "Failed to create gzip processing script: $($_.Exception.Message)" "Error"
+        return $false
+    }
 }

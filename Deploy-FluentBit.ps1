@@ -44,9 +44,19 @@ param(
     # Log Paths Configuration (simplified - no gzip paths)
     [Parameter(Mandatory=$false)]
     [string[]]$LogPaths = @("D:\c-base\logs"),
-    
+
     [Parameter(Mandatory=$false)]
     [int]$MaxDirectoryDepth = 3,
+    
+    # NEW: Gzip Processing Parameters
+    [Parameter(Mandatory=$false)]
+    [switch]$ProcessGzipFiles = $false,
+    
+    [Parameter(Mandatory=$false)]
+    [int]$GzipBatchSize = 5,
+    
+    [Parameter(Mandatory=$false)]
+    [int]$GzipProcessingInterval = 15,  # 5 minutes
     
     # Cleanup Options
     [Parameter(Mandatory=$false)]
@@ -101,7 +111,7 @@ catch {
 # Main deployment function
 function Start-Deployment {
     Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "║              FluentBit Simplified Deployment                 ║" -ForegroundColor Cyan
+    Write-Host "║                   FluentBit Deployment                       ║" -ForegroundColor Cyan
     Write-Host "║         Install + Config + Service + Monitoring              ║" -ForegroundColor Cyan
     Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""
@@ -140,6 +150,16 @@ function Start-Deployment {
         Write-Status "FluentBit log file: $FluentBitLogPath" "Info"
         Write-Status "Clean install: $CleanInstall" "Info"
         Write-Status "Deep clean: $DeepClean" "Info"
+
+        if ($ProcessGzipFiles) {
+            Write-Status "=== GZIP PROCESSING ENABLED ===" "Info"
+            Write-Status "Gzip batch size: $GzipBatchSize" "Info"
+            Write-Status "Gzip processing interval: $GzipProcessingInterval seconds" "Info"
+            Write-Status "Gzip temp directory: $StoragePath\gzip-temp" "Info"
+            Write-Status "Would scan LogPaths for .gz files at depths 0-$MaxDirectoryDepth" "Info"
+        } else {
+            Write-Status "Gzip processing: DISABLED (use -ProcessGzipFiles to enable)" "Info"
+        }
         
         return $true
     }
@@ -186,6 +206,15 @@ function Start-Deployment {
         }
     }
     
+    # Step 3.5: Initialize gzip processing if enabled
+    if ($success -and $ProcessGzipFiles) {
+        Write-Status "Initializing gzip archive processing..." "Step"
+        if (-not (Initialize-GzipProcessing -LogPaths $LogPaths -MaxDepth $MaxDirectoryDepth -StoragePath $StoragePath)) {
+            Write-Status "Gzip processing initialization failed, continuing without gzip processing..." "Warning"
+            $ProcessGzipFiles = $false  # Disable gzip processing for this deployment
+        }
+    }
+
     # Step 4: Deploy and customize configuration files
     if ($success) {
         if (-not (Deploy-ConfigurationFiles)) {
@@ -252,18 +281,56 @@ function Start-Deployment {
         } else {
             Write-Status "⚠ FluentBit service status: $($service.Status)" "Warning"
         }
+
+        # Gzip processing verification
+        if ($ProcessGzipFiles) {
+            Write-Host "`n" -NoNewline
+            Write-Status "Verifying gzip processing setup..." "Info"
+            
+            $gzipStateFile = "$StoragePath\gzip-processing-state.json"
+            if (Test-Path $gzipStateFile) {
+                try {
+                    $gzipState = Get-Content $gzipStateFile -Raw | ConvertFrom-Json
+                    $stats = $gzipState.processing_stats
+                    Write-Status "✓ Gzip processing initialized: $($stats.total_files) archive files discovered" "Success"
+                    
+                    if ($stats.total_files -gt 0) {
+                        Write-Status "✓ First gzip batch will process in $($gzipState.processing_interval) seconds" "Success"
+                        Write-Host "📁 Gzip temp directory: $($gzipState.gzip_temp_dir)" -ForegroundColor Cyan
+                        Write-Host "📊 Gzip status: Get-Content '$gzipStateFile' | ConvertFrom-Json | Select processing_stats" -ForegroundColor Cyan
+                    } else {
+                        Write-Status "ℹ No gzip files found in monitored directories" "Info"
+                    }
+                }
+                catch {
+                    Write-Status "⚠ Gzip state file exists but is malformed" "Warning"
+                }
+            } else {
+                Write-Status "⚠ Gzip processing enabled but state file not created" "Warning"
+            }
+        }
         
         Write-Host "`n🚀 Your FluentBit deployment is ready!" -ForegroundColor Green
         Write-Host "📋 Monitor logs: Get-Content '$FluentBitLogPath' -Tail 20 -Wait" -ForegroundColor Cyan
         Write-Host "🌐 HTTP metrics: http://localhost:2020" -ForegroundColor Cyan
         Write-Host "📊 Check status: & '$(Split-Path $FluentBitLogPath -Parent)\check-fluent-bit-status.ps1'" -ForegroundColor Cyan
-        
+
+        if ($ProcessGzipFiles) {
+            Write-Host "📦 Gzip processor: Get-Content '$StoragePath\gzip-processor.log' -Tail 10 -Wait" -ForegroundColor Cyan
+            Write-Host "📈 Gzip status: Get-Content '$StoragePath\gzip-processing-state.json' | ConvertFrom-Json | Select processing_stats" -ForegroundColor Cyan
+        }
     } else {
         Write-Status "Deployment completed with errors. Please check the output above." "Error"
         Write-Host "`nFor troubleshooting:" -ForegroundColor Yellow
         Write-Host "1. Check FluentBit logs: Get-Content '$FluentBitLogPath'" -ForegroundColor Gray
         Write-Host "2. Check Windows Event Logs for service errors" -ForegroundColor Gray
         Write-Host "3. Try manual FluentBit run: & '$InstallPath\bin\fluent-bit.exe' -c '$ConfigPath\fluent-bit-onbe.conf'" -ForegroundColor Gray
+        
+        if ($ProcessGzipFiles) {
+            Write-Host "4. Check gzip processor logs: Get-Content '$StoragePath\gzip-processor.log'" -ForegroundColor Gray
+            Write-Host "5. Check gzip state: Get-Content '$StoragePath\gzip-processing-state.json'" -ForegroundColor Gray
+            Write-Host "6. Manual gzip test: & '$InstallPath\scripts\Process-GzipFiles.ps1' -StoragePath '$StoragePath'" -ForegroundColor Gray
+        }
     }
     
     return $success
@@ -313,6 +380,23 @@ if ($MyInvocation.InvocationName -ne '.') {
     if ($validLogPaths.Count -eq 0 -and -not $TestOnly) {
         Write-Status "Warning: None of the specified log paths exist. Continuing anyway..." "Warning"
     }
+
+    # Validate gzip processing parameters
+    if ($ProcessGzipFiles) {
+        Write-Status "Gzip processing enabled with batch size: $GzipBatchSize, interval: $GzipProcessingInterval seconds" "Info"
+        
+        if ($GzipBatchSize -lt 1 -or $GzipBatchSize -gt 20) {
+            Write-Status "Invalid GzipBatchSize: $GzipBatchSize. Valid range: 1-20" "Error"
+            exit 1
+        }
+        
+        if ($GzipProcessingInterval -lt 10) {
+            Write-Status "GzipProcessingInterval too low: $GzipProcessingInterval. Minimum: 10 seconds" "Error"
+            exit 1
+        }
+    } else {
+        Write-Status "Gzip processing disabled (use -ProcessGzipFiles to enable)" "Info"
+    }
     
     # Show simplified startup information
     Write-Host "FluentBit Deployment Parameters:" -ForegroundColor Cyan
@@ -322,6 +406,12 @@ if ($MyInvocation.InvocationName -ne '.') {
     Write-Host "  • Log Paths: $($LogPaths.Count) paths, max depth $MaxDirectoryDepth" -ForegroundColor Gray
     Write-Host "  • Installation: $InstallPath" -ForegroundColor Gray
     Write-Host "  • Logging: $FluentBitLogPath" -ForegroundColor Gray
+
+    if ($ProcessGzipFiles) {
+        Write-Host "  • Gzip Processing: ENABLED (batch: $GzipBatchSize, interval: ${GzipProcessingInterval}s)" -ForegroundColor Green
+    } else {
+        Write-Host "  • Gzip Processing: DISABLED" -ForegroundColor Gray
+    }
     
     Start-Deployment
 }

@@ -8,10 +8,12 @@ To use the script, just run:
 .\Deploy-FluentBit.ps1 `
      -CtrlBHost "10.91.27.4" `
      -CtrlBPort "5080" `
-     -CtrlBStreamName "test" `
+     -CtrlBStreamName "test_qa" `
      -CtrlBAuthHeader "Authorization Basic <key>" `
      -LogPaths @("C:\ProgramData\GuestConfig", "D:\c-base\logs") `
      -MaxDirectoryDepth 4 `
+     -ProcessGzipFiles `
+     -GzipBatchSize 3
      -DeepClean `
      -CleanInstall `
 ```

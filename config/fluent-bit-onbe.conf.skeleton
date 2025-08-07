@@ -13,8 +13,13 @@
     storage.backlog.mem_limit   256M
     storage.max_chunks_up       256
 
+
 # Input sections would be generated programatically using the deployment script
 # Assumptions: Inputs can have tags of two types: app.java.* or app.sql_server.*
+<REGULAR_LOG_INPUTS>
+
+# Gzip processing sections (only if ProcessGzipFiles is enabled)
+<GZIP_INPUTS>
 
 [FILTER]
     Name                        sysinfo
@@ -45,6 +50,12 @@
     Match                       *
     script                      C:\Program Files\fluent-bit\conf\supporting_functions.lua
     call                        convert_timestamp
+
+[FILTER]
+    Name                        lua
+    Match                       app.java.gzip.*
+    script                      C:\Program Files\fluent-bit\conf\supporting_functions.lua
+    call                        map_gzip_source_path
 
 [FILTER]
     Name                        modify

@@ -111,6 +111,32 @@ if (Test-Path "$FluentBitLogPath") {
     Write-Host "Log file not found: $FluentBitLogPath" -ForegroundColor Red
 }
 
+# Check gzip processing status
+Write-Host "`nGzip Processing Status:" -ForegroundColor Cyan
+`$gzipStateFile = "$StoragePath\gzip-processing-state.json"
+if (Test-Path `$gzipStateFile) {
+    try {
+        `$gzipState = Get-Content `$gzipStateFile -Raw | ConvertFrom-Json
+        `$stats = `$gzipState.processing_stats
+        
+        Write-Host "Gzip Processing: ENABLED" -ForegroundColor Green
+        Write-Host "Total Files: `$(`$stats.total_files) | Completed: `$(`$stats.completed) | Pending: `$(`$stats.pending) | Failed: `$(`$stats.failed)" -ForegroundColor Gray
+        Write-Host "Batch Size: `$(`$gzipState.batch_size) | Interval: `$(`$gzipState.processing_interval)s" -ForegroundColor Gray
+        Write-Host "Temp Directory: `$(`$gzipState.gzip_temp_dir)" -ForegroundColor Gray
+        
+        # Show recent gzip processor activity
+        `$gzipLogFile = "$StoragePath\gzip-processor.log"
+        if (Test-Path `$gzipLogFile) {
+            Write-Host "`nRecent Gzip Processing:" -ForegroundColor Cyan
+            Get-Content `$gzipLogFile -Tail 3 | ForEach-Object { Write-Host "  `$_" -ForegroundColor Gray }
+        }
+    } catch {
+        Write-Host "Gzip Processing: ERROR reading state file" -ForegroundColor Red
+    }
+} else {
+    Write-Host "Gzip Processing: DISABLED" -ForegroundColor Gray
+}
+
 # Check HTTP metrics endpoint
 Write-Host "`nHTTP Metrics Endpoint:" -ForegroundColor Cyan
 try {
@@ -127,6 +153,15 @@ Write-Host "  Stop Service: Stop-Service fluent-bit" -ForegroundColor Gray
 Write-Host "  Restart Service: Restart-Service fluent-bit" -ForegroundColor Gray
 Write-Host "  Monitor Logs: & '$tailScriptPath'" -ForegroundColor Gray
 Write-Host "  View Metrics: http://localhost:2020" -ForegroundColor Gray
+
+# Gzip-specific commands
+if (Test-Path "$StoragePath\gzip-processing-state.json") {
+    Write-Host "`nGzip Processing Commands:" -ForegroundColor Cyan
+    Write-Host "  Check Gzip Status: Get-Content '$StoragePath\gzip-processing-state.json' | ConvertFrom-Json | Select-Object processing_stats" -ForegroundColor Gray
+    Write-Host "  Monitor Gzip Logs: Get-Content '$StoragePath\gzip-processor.log' -Tail 10 -Wait" -ForegroundColor Gray
+    Write-Host "  List Temp Files: Get-ChildItem '$StoragePath\gzip-temp' -Recurse" -ForegroundColor Gray
+    Write-Host "  Manual Gzip Run: & '$InstallPath\scripts\Process-GzipFiles.ps1' -StoragePath '$StoragePath'" -ForegroundColor Gray
+}
 "@
     
     $statusScriptPath = "$logDir\check-fluent-bit-status.ps1"
@@ -180,6 +215,42 @@ function Show-DeploymentSummary {
         Write-Host "  • $path\*.log (recursive)"
     }
     
+    if ($ProcessGzipFiles) {
+        Write-Host "`nGzip Archive Processing:" -ForegroundColor Yellow
+        
+        # Try to read gzip state file for statistics
+        $gzipStateFile = "$StoragePath\gzip-processing-state.json"
+        if (Test-Path $gzipStateFile) {
+            try {
+                $gzipState = Get-Content $gzipStateFile -Raw | ConvertFrom-Json
+                $stats = $gzipState.processing_stats
+                
+                Write-Host "  • Total gzip files discovered: $($stats.total_files)"
+                Write-Host "  • Processing batch size: $($gzipState.batch_size) files"
+                Write-Host "  • Processing interval: $($gzipState.processing_interval) seconds"
+                Write-Host "  • Temp extraction directory: $($gzipState.gzip_temp_dir)"
+                Write-Host "  • Current status: $($stats.completed) completed, $($stats.pending) pending, $($stats.failed) failed"
+                
+                # Show folder organization
+                $folderNames = $gzipState.discovered_files | 
+                              Select-Object -ExpandProperty folder_name | 
+                              Sort-Object -Unique
+                Write-Host "  • Organized extraction folders: $($folderNames -join ', ')"
+                
+                # Show tag pattern
+                Write-Host "  • Gzip tag pattern: app.java.gzip.{folderName}.archived"
+            }
+            catch {
+                Write-Host "  • Status: Gzip state file exists but couldn't read statistics" -ForegroundColor Gray
+            }
+        } else {
+            Write-Host "  • Status: Gzip processing initialized but no state file found yet" -ForegroundColor Gray
+        }
+    } else {
+        Write-Host "`nGzip Archive Processing: DISABLED" -ForegroundColor Gray
+        Write-Host "  • Use -ProcessGzipFiles flag to enable historical .gz file processing"
+    }
+
     # Show cleanup actions if performed
     if ($CleanInstall -or $DeepClean) {
         Write-Host "`nCleanup Actions Performed:" -ForegroundColor Yellow
