@@ -591,6 +591,7 @@ function Deploy-ConfigurationFiles {
             
             # Replace placeholders with actual values
             $configContent = $configContent -replace '<LOG_LEVEL>', $LogLevel
+            $configContent = $configContent -replace '<LOG_FILE>', $FluentBitLogPath
             $configContent = $configContent -replace '<STORAGE_PATH>', $StoragePath
             $configContent = $configContent -replace '<CTRLB_BACKEND_HOST>', $CtrlBHost
             $configContent = $configContent -replace '<CTRLB_BACKEND_PORT>', $CtrlBPort

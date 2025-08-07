@@ -2,6 +2,7 @@
     Flush                       1
     Daemon                      Off
     Log_Level                   <LOG_LEVEL>
+    Log_File                    <LOG_FILE>
     Parsers_File                C:\Program Files\fluent-bit\conf\parsers-onbe.conf
     HTTP_Server                 On
     HTTP_Listen                 0.0.0.0
