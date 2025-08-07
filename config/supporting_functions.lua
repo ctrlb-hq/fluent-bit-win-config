@@ -7,7 +7,7 @@ local host_info_cache = nil
 
 function add_host_info(tag, timestamp, record)
     if host_info_cache then
-        for key, value in pairs(host_info) do
+        for key, value in pairs(host_info_cache) do
             record[key] = value
         end
         return 1, timestamp, record
@@ -36,7 +36,7 @@ function add_host_info(tag, timestamp, record)
         host_fqdn = host_fqdn
     }
 
-    for key, value in pairs(host_info) do
+    for key, value in pairs(host_info_cache) do
         record[key] = value
     end
 
