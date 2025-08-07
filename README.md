@@ -1,48 +1,42 @@
-# Setting up FluentBit
+# Setting up FluentBit for log files tracking
 
-We have created a script which you would need to call just once to correctly setup FluentBit for log pipelining.
+Welcome to our guide for setting up FluentBit for tracking log files. We have built parsers for FluentBit specific to the logs shared previously. Correctly setting up FluentBit is very simple, a short walkthrough is mentioned below:
 
-To use the script, just run:
-
-```ps
-.\Deploy-FluentBit.ps1 `
-     -CtrlBHost "10.91.27.4" `
-     -CtrlBPort "5080" `
-     -CtrlBStreamName "test_qa" `
-     -CtrlBAuthHeader "Authorization Basic <key>" `
-     -LogPaths @("C:\ProgramData\GuestConfig", "D:\c-base\logs") `
-     -MaxDirectoryDepth 4 `
-     -ProcessGzipFiles `
-     -GzipBatchSize 3
-     -DeepClean `
-     -CleanInstall `
-```
-
-The key points to note here are:
-- `-LogPaths` accept an array of directories within which `.log` files will be tracked.
-- `GzipPaths` accept an array of directories within which `.gz` files will be tracked.
-- `MaxDirectoryDepth` indicates the max depth FluentBit will go recursively into to search for the `.log` and `.gz` files.
-
-Do note this FluentBit is going to be deployed as a Windows Service, running in the background. To check its status, go to `localhost:2020/api/v1/metrics`.  
-Logs of FluentBit can be found using this command: `Get-Content "C:\temp\logs\fluent-bit.log" -Tail 20 -Wait `.
-
-Also, this FluentBit service will track SQL Server logs from the default location. It will only track the `ERRORLOG` file contents.
-
-The deploy script is now idempotent as long as you use the `-DeepClean` and `-CleanInstall` flags.
-
-## Possible Issues and Fixes
-
-- Remember to run Powershell in Administrator mode.
-- Powershell does not allow running of scripts by default. You might need to do:
+1. Install FluentBit
 
 ```ps
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+> Invoke-WebRequest -Uri https://packages.fluentbit.io/windows/fluent-bit-4.0.4-win64.exe -OutFile fluent-bit-installer.exe
+
+> Start-Process -FilePath fluent-bit-installer.exe -ArgumentList "/S" -Wait
+
+# Test if installed successfully
+> Test-Path "C:\Program Files\fluent-bit\bin\fluent-bit.exe"
 ```
 
-and then Yes to All [A] to be able to run scripts.
+2. Copy over contents of `config\` to `C:\Program Files\fluent-bit\config\` directory (create if not exists).
 
-To track the logs of FluentBit:
+3. (Optional) Create empty directory `C:\temp\flb-storage` (FluentBit handles this implicitly, but we like to be verbose).
+
+4. Change the entries in `C:\Program Files\fluent-bit\config\fluent-bit-onbe-staging.conf` as per your local paths:
+* Within `[INPUT]`, modify the `Path` value to track the correct log files.
+* Within `[OUTPUT]`, modify the `Host` and `Port` to point to the correct endpoint where CtrlB will ingest the JSON logs.
+
+5. Run Fluent Bit:
 
 ```ps
-& 'C:\temp\logs\monitor-fluent-bit.ps1'
+> & "C:\Program Files\fluent-bit\bin\fluent-bit.exe" -c "C:\Program Files\fluent-bit\config\fluent-bit-onbe-staging.conf"
 ```
+
+The output should be a bunch of `info` level logs, ending with:
+
+```ps
+[ info] [http_server] listen iface=0.0.0.0 tcp_port=2020
+[ info] [sp] stream processor started
+[ info] [engine] Shutdown Grace Period=5, Shutdown Input Grace Period=2
+```
+
+### Additional Notes
+
+* FluentBit is configured in such a way that it would not re-read files once read. In fact, if FluentBit goes down for a while, it will resume reading from the last positions in the files it left off.
+
+* We try to extract some basic fields from the log body, specifically the timestamp mentioned there (smapped to field `onbe_timestamp`), and the log level (mapped to field `level`). In case parsing fails, we store the entire log entry as a string.
