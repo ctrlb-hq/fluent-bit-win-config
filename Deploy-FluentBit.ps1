@@ -56,7 +56,7 @@ param(
     [int]$GzipBatchSize = 5,
     
     [Parameter(Mandatory=$false)]
-    [int]$GzipProcessingInterval = 15,  # 5 minutes
+    [int]$GzipProcessingInterval = 15,
     
     # Cleanup Options
     [Parameter(Mandatory=$false)]
