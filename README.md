@@ -8,16 +8,12 @@ To use the script, just run:
 .\Deploy-FluentBit.ps1 `
      -CtrlBHost "10.91.27.4" `
      -CtrlBPort "5080" `
+     -CtrlBStreamName "test" `
      -CtrlBAuthHeader "Authorization Basic <key>" `
      -LogPaths @("C:\ProgramData\GuestConfig", "D:\c-base\logs") `
-     -GzipPaths @("C:\ProgramData\GuestConfig", "D:\c-base\logs") `
      -MaxDirectoryDepth 4 `
-     -MaxGzipFilesPerRun 4 `
-     -MaxGzipBatchSizeMB 300 `
-     -GzipSleepBetweenFiles 3 `
      -DeepClean `
      -CleanInstall `
-     -FluentBitLogLevel "info"
 ```
 
 The key points to note here are:
