@@ -11,7 +11,8 @@
     storage.sync                normal
     storage.checksum            off
     storage.backlog.mem_limit   256M
-    storage.max_chunks_up       256
+    storage.max_chunks_up       128
+    storage.total_limit_size    1024M
 
 
 # Input sections would be generated programatically using the deployment script

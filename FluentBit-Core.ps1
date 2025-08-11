@@ -1094,8 +1094,8 @@ function Generate-GzipInputSections {
     Refresh_Interval            1
     multiline.parser            java
     Buffer_Chunk_Size           256K
-    Buffer_Max_Size             4M
-    Mem_Buf_Limit               50M
+    Buffer_Max_Size             2M
+    Mem_Buf_Limit               25M
     storage.type                filesystem
 "@
             $inputSections += $inputSection
@@ -1232,6 +1232,19 @@ function Remove-ProcessedTempFiles {
     }
     
     return $cleanupCount
+}
+
+if (Test-Path $logFile) {
+    $logSizeBytes = (Get-Item $logFile).Length
+    $logSizeMB = $logSizeBytes / 1MB
+    
+    if ($logSizeMB -gt 100) {
+        Write-GzipLog "Log file too large ($([math]::Round($logSizeMB, 2)) MB), rotating..." "WARN"
+        $rotatedLog = "$logFile.old"
+        if (Test-Path $rotatedLog) { Remove-Item $rotatedLog -Force }
+        Move-Item $logFile $rotatedLog
+        Write-GzipLog "Log rotated. Previous log saved as $rotatedLog" "INFO"
+    }
 }
 
 try {
